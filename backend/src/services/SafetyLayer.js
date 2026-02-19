@@ -1,137 +1,261 @@
 const geolib = require('geolib');
 const CONFIG = require('../config');
+const Store = require('./InMemoryStore');
+const axios = require('axios'); // For Spring Boot communication
+const logger = require('./Logger');
 
 /**
- * SAFETY LAYER (Microservice)
+ * UNIVERSAL SAFETY SHIELD
  * ---------------------------
- * This class encapsulates all safety logic.
- * It is designed to be "plugged in" to any ride-sharing backend (Rapido, Uber, Ola).
- * 
- * Usage:
- * const safety = new SafetyLayer(io);
- * safety.monitorRide(rideId, routePath);
+ * This class encapsulates all safety logic for vehicle and personal monitoring.
+ * Design: Plug-and-play middleware for any mobility or personal safety app.
  */
 class SafetyLayer {
     constructor(io) {
         this.io = io;
-        this.activeRides = new Map(); // Store state: { rideId: { path, lastLocation, status } }
+        this.HEARTBEAT_TIMEOUT = 15000; // 15s timeout for signal loss
+        this.POLICE_SERVICE_URL = process.env.POLICE_SERVICE_URL || 'http://localhost:8080/api/incidents';
+        this.API_KEY = process.env.SAMSUNG_KNOX_API_KEY || "SAMSUNG_SECURE_KNOX_007";
+        this.RETRY_INTERVAL = parseInt(process.env.RETRY_INTERVAL_MS) || 10000;
+        this._setupAlertListener();
     }
 
     /**
-     * Start monitoring a new ride.
-     * @param {Object} rideDetails - { rideId, driverName, vehicleNumber, passengerName }
-     * @param {Array} plannedPath - Array of {lat, lng} coordinates
+     * Start monitoring a new session (Ride/Walk/Solo).
      */
-    initializeRide(rideDetails, plannedPath) {
-        const rideId = rideDetails.rideId;
-        // Find nearest Police Station to START location
+    async initializeMonitor(details, plannedPath) {
+        const id = details.rideId || details.userId;
         const startLoc = plannedPath[0];
-        const initialGuardian = this._findNearestStation(startLoc);
+        const initialGuardian = await this._findNearestStation(startLoc);
 
-        this.activeRides.set(rideId, {
+        const monitorData = {
             path: plannedPath,
             guardian: initialGuardian,
             status: 'SAFE',
-            details: rideDetails, // 🆕 Store Details
-            riskScore: 0
-        });
+            details: details,
+            riskScore: 0,
+            lastLocation: startLoc,
+            lastUpdate: Date.now(),
+            history: [startLoc],
+            escalationStage: 'NORMAL'
+        };
 
-        console.log(`🛡️ SAFETY LAYER: Initialized monitoring for ${rideId}. Guardian: ${initialGuardian.name}`);
+        await Store.saveMonitor(id, monitorData);
 
-        // Notify the relevant Police Station immediately
-        this.io.emit('women_cell_alert', {
-            msg: `🔵 NEW RIDE: Monitoring Started in your jurisdiction.`,
-            rideId: rideId,
+        console.log(`🛡️ SAFETY SHIELD: Monitoring active for ${id}. Primary Responder: ${initialGuardian.name}`);
+
+        // For demo dashboard:
+        this.io.emit('emergency_response_alert', {
+            type: 'MONITORING_STARTED',
+            msg: `🔵 NEW SESSION: Secured monitoring initiated.`,
+            id: id,
             stationId: initialGuardian.id
         });
     }
 
     /**
-     * Process a real-time location update.
+     * Process real-time location with GPS Drift Filtering.
      */
-    processLocationUpdate(rideId, location, isSimulatedDeviation = false) {
-        const ride = this.activeRides.get(rideId);
-        if (!ride) return;
+    async processLocationUpdate(id, location, isSimulatedDeviation = false) {
+        const monitor = await Store.getMonitor(id);
+        if (!monitor) return;
 
-        // 1. Dynamic Handover
-        const newGuardian = this._findNearestStation(location);
-        if (newGuardian.id !== ride.guardian.id) {
+        // 1. Connectivity Heartbeat Update
+        monitor.lastUpdate = Date.now();
+
+        // 2. GPS Drift Filter (Simple Moving Average or Distance Threshold)
+        const distanceMoved = geolib.getDistance(monitor.lastLocation, location);
+        if (distanceMoved < 5 && !isSimulatedDeviation) {
+            return; // Ignore jitter < 5m
+        }
+
+        monitor.lastLocation = location;
+        monitor.history.push(location);
+
+        // 3. Dynamic Handover
+        const newGuardian = await this._findNearestStation(location);
+        if (newGuardian.id !== monitor.guardian.id) {
+            const oldGuardian = monitor.guardian;
+            monitor.guardian = newGuardian;
+
             this.io.emit('handoff_accept', {
                 stationName: newGuardian.name,
-                oldStation: ride.guardian.name,
-                rideId: rideId
+                oldStation: oldGuardian.name,
+                id: id
             });
-            ride.guardian = newGuardian;
         }
 
-        // 2. Anomaly Detection Logic
+        // 4. Anomaly Detection Logic
         if (isSimulatedDeviation) {
-            // Check current escalation stage
-            if (!ride.escalationStage || ride.escalationStage === 'NORMAL') {
-                // STAGE 1: Visual Deviation Detected -> Ask User
-                this._initiateSafetyCheck(rideId);
-            } else if (ride.escalationStage === 'VERIFIED_UNSAFE') {
-                // STAGE 3: User Confirmed Danger -> Police Alert
-                this.triggerAlert(rideId, "CONFIRMED_THREAT", location);
+            if (monitor.escalationStage === 'NORMAL') {
+                await this._initiateSafetyCheck(id, monitor);
+            } else if (monitor.escalationStage === 'VERIFIED_UNSAFE') {
+                this.triggerAlert(id, "ROUTE_DEVIATION", location);
             }
-            // If 'USER_SAID_SAFE', we ignore this deviation (False Alarm)
         }
+
+        await Store.saveMonitor(id, monitor);
     }
 
-    _initiateSafetyCheck(rideId) {
-        const ride = this.activeRides.get(rideId);
-        if (ride.escalationStage === 'PENDING_RESPONSE') return; // Already asked
+    async _initiateSafetyCheck(id, monitor) {
+        if (monitor.escalationStage === 'PENDING_RESPONSE') return;
 
-        console.log(`⚠️ DEVIATION: Asking User if they are safe...`);
-        ride.escalationStage = 'PENDING_RESPONSE';
+        console.log(`⚠️ ANOMALY: Requesting user verification for ${id}`);
+        monitor.escalationStage = 'PENDING_RESPONSE';
+        await Store.saveMonitor(id, monitor);
 
-        // Emit logic to MobileApp to show "Are you Safe?" Popup
-        this.io.to(rideId).emit('safety_check_request', {
-            msg: "⚠️ Route Deviation Detected. Are you safe?"
+        this.io.to(id).emit('safety_check_request', {
+            msg: "⚠️ Protocol Deviation Detected. Confirm Safety Status.",
+            type: "DEVIATION"
         });
+
+        // Timeout for auto-escalation (Samsung-level safety)
+        setTimeout(async () => {
+            const current = await Store.getMonitor(id);
+            if (current && current.escalationStage === 'PENDING_RESPONSE') {
+                console.log(`🚨 AUTO-ESCALATION: No response from user ${id}`);
+                this.triggerAlert(id, "NO_RESPONSE_AUTO_ESCALATE", current.lastLocation);
+            }
+        }, CONFIG.THRESHOLDS.ESCALATION_TIMEOUT * 1000);
     }
 
-    // Called via Socket when User clicks Yes/No
-    handleUserResponse(rideId, isSafe) {
-        const ride = this.activeRides.get(rideId);
-        if (!ride) return;
+    async handleUserResponse(id, isSafe) {
+        const monitor = await Store.getMonitor(id);
+        if (!monitor) return;
 
         if (isSafe) {
-            console.log(`✅ User verified SAFE. Silencing alerts.`);
-            ride.escalationStage = 'USER_SAID_SAFE';
-            // Optional: Reset after 30s so we can detect *next* deviation
-            setTimeout(() => { ride.escalationStage = 'NORMAL'; }, 10000);
+            console.log(`✅ User ${id} verified SAFE.`);
+            monitor.escalationStage = 'USER_SAID_SAFE';
+            setTimeout(async () => {
+                const m = await Store.getMonitor(id);
+                if (m) { m.escalationStage = 'NORMAL'; await Store.saveMonitor(id, m); }
+            }, 15000);
         } else {
-            console.log(`🚨 User verified UNSAFE! Escalating to Police.`);
-            ride.escalationStage = 'VERIFIED_UNSAFE';
-            // Trigger Police immediately (will happen on next location update or now)
-            // We pass null for location here as we'll pick it up next tick, or could cache it.
-            // Better to wait for next tick or store lastLoc.
+            console.log(`🚨 User ${id} verified UNSAFE! DISPATCHING.`);
+            monitor.escalationStage = 'VERIFIED_UNSAFE';
+            this.triggerAlert(id, "USER_CONFIRMED_THREAT", monitor.lastLocation);
+        }
+        await Store.saveMonitor(id, monitor);
+    }
+
+    async triggerAlert(id, type, location) {
+        let monitor = await Store.getMonitor(id);
+
+        // If unknown device triggers SOS, create a placeholder monitor
+        if (!monitor) {
+            logger.info(`📡 UNKNOWN DEVICE SOS: Creating transient monitor for ${id}`);
+            monitor = {
+                id: id,
+                status: 'SAFE',
+                lastLocation: location,
+                lastUpdate: Date.now(),
+                details: { passengerName: "Samsung User", vehicleNumber: "DEVICE_DIRECT" },
+                guardian: (await Store.getStations())[0] // Default to first station
+            };
+        }
+
+        if (monitor.status === 'ALERT') return;
+
+        monitor.status = 'ALERT';
+        const msg = type === "USER_CONFIRMED_THREAT" ? "🚨 ACTIVE THREAT VERIFIED BY USER" : "⚠️ AUTOMATED EMERGENCY DISPATCH";
+
+        // Generate Automated Dispatch Link (Google Maps Navigation)
+        const dispatchLink = `https://www.google.com/maps/dir/?api=1&destination=${location.lat},${location.lng}&travelmode=driving`;
+
+        // 👮 ENTERPRISE REPORTING: Store & Forward Pattern (Resilience)
+        const incidentPayload = {
+            sessionId: id,
+            type: type,
+            message: msg,
+            passengerName: monitor.details.passengerName,
+            vehicleNumber: monitor.details.vehicleNumber,
+            jurisdiction: monitor.guardian.name,
+            dispatchLink: dispatchLink,
+            latitude: location.lat,
+            longitude: location.lng
+        };
+
+        this.sendToPoliceService(incidentPayload);
+
+        logger.warn(`🚨 EMERGENCY DISPATCH: ${type} for ${id}`);
+
+        this.io.emit('emergency_response_alert', {
+            id: id,
+            type: type,
+            msg: msg,
+            details: monitor.details,
+            location: location,
+            dispatchLink: dispatchLink,
+            jurisdiction: monitor.guardian.name
+        });
+        await Store.saveMonitor(id, monitor);
+    }
+
+    async sendToPoliceService(payload) {
+        try {
+            await axios.post(this.POLICE_SERVICE_URL, payload, {
+                headers: { 'x-api-key': this.API_KEY }
+            });
+            logger.info(`🏙️ ENTERPRISE: Incident logged for ${payload.sessionId} in Police Microservice.`);
+        } catch (error) {
+            logger.error(`⚠️ ENTERPRISE NETWORK ERROR: Police Service Unreachable for ${payload.sessionId}. Queuing incident...`);
+            this.queueIncident(payload);
         }
     }
 
-    triggerAlert(rideId, type, location) {
-        const ride = this.activeRides.get(rideId);
-        if (ride.status === 'ALERT') return; // Don't spam
+    queueIncident(payload) {
+        if (!this.retryQueue) this.retryQueue = [];
+        this.retryQueue.push(payload);
 
-        ride.status = 'ALERT';
-        console.log(`🚨 POLICE DISPATCHED: ${type} for ${rideId}`);
-
-        this.io.emit('anomaly_alert', {
-            rideId: rideId,
-            type: type,
-            msg: `⚠️ ROUTE DEVIATION VERIFIED BY USER!`,
-            details: ride.details,
-            location: location, // 📍 Includes Lat/Lng
-            jurisdiction: ride.guardian.name
-        });
+        if (!this.retryInterval) {
+            logger.info(`🔄 STARTING RETRY WORKER: Will attempt to sync every ${this.RETRY_INTERVAL}ms.`);
+            this.retryInterval = setInterval(() => this.processRetryQueue(), this.RETRY_INTERVAL);
+        }
     }
 
-    _findNearestStation(location) {
-        // Use geolib to find nearest station from CONFIG
-        const nearest = geolib.findNearest(location, CONFIG.SAFE_HAVENS);
-        // Find the full object
-        return CONFIG.SAFE_HAVENS.find(s => s.lat === nearest.lat && s.lng === nearest.lng);
+    async processRetryQueue() {
+        if (this.retryQueue.length === 0) return;
+
+        logger.info(`🔄 RETRY WORKER: Attempting to sync ${this.retryQueue.length} pending incidents...`);
+        const item = this.retryQueue[0]; // Peek
+
+        try {
+            await axios.post(this.POLICE_SERVICE_URL, item, {
+                headers: { 'x-api-key': this.API_KEY }
+            });
+            logger.info(`✅ RETRY SUCCESS: Synced incident for ${item.sessionId} to Cloud.`);
+            this.retryQueue.shift(); // Remove on success
+
+            if (this.retryQueue.length === 0) {
+                clearInterval(this.retryInterval);
+                this.retryInterval = null;
+                logger.info("✅ RETRY WORKER: Queue empty. Going to sleep.");
+            }
+        } catch (e) {
+            logger.warn("❌ RETRY FAILED: Police Service still down. Waiting...");
+        }
+    }
+
+    async _findNearestStation(location) {
+        const stations = await Store.getStations();
+        const coords = stations.map(s => ({ lat: s.location.coordinates[1], lng: s.location.coordinates[0], id: s._id }));
+        const nearestCoord = geolib.findNearest(location, coords);
+        const station = stations.find(s => s._id === nearestCoord.id);
+        return { id: station._id, name: station.name, lat: station.location.coordinates[1], lng: station.location.coordinates[0] };
+    }
+
+    async checkHeartbeats() {
+        const now = Date.now();
+        const allMonitors = await Store.getAllMonitors();
+
+        for (const monitor of allMonitors) {
+            if (monitor.status !== 'SAFE') continue;
+
+            if (now - monitor.lastUpdate > this.HEARTBEAT_TIMEOUT) {
+                console.log(`📡 SIGNAL LOSS: ${monitor.id} lost contact.`);
+                this.triggerAlert(monitor.id, "SIGNAL_LOSS_DETECTED", monitor.lastLocation);
+            }
+        }
     }
 }
 

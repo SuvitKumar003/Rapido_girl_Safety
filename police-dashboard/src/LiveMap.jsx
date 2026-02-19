@@ -32,8 +32,9 @@ const stations = [
 
 function LiveMap() {
     const [rides, setRides] = useState({});
-    const [alertData, setAlertData] = useState(null);
     const [activeLogs, setActiveLogs] = useState([]);
+    const [history, setHistory] = useState([]);
+    const [showHistory, setShowHistory] = useState(false);
 
     const addLog = (msg, type = 'info') => {
         const timestamp = new Date().toLocaleTimeString();
@@ -64,24 +65,10 @@ function LiveMap() {
             addLog(`HANDOVER: ${data.oldStation} -> ${data.stationName}`, 'info');
         });
 
-        // 👮 WOMEN CELL ALERTS
-        socket.on('women_cell_alert', (data) => {
-            // alert(data.msg); // Use console/toast to avoid blocking UI
-        });
-
-        socket.on('women_cell_update', (data) => {
-            console.log(data.msg);
-        });
-
-        // 🚨 LISTEN FOR SOS
-        socket.on('sos_alert', (data) => {
-            triggerPanic(data.rideId, { msg: "🆘 SOS TRIGGERED BY PASSENGER" }, true);
-        });
-
-        // ⚠️ LISTEN FOR ANOMALY (Route Deviation)
-        socket.on('anomaly_alert', (data) => {
-            console.log("Anomaly Received:", data);
-            triggerPanic(data.rideId, data, false);
+        // 🚨 UNIVERSAL EMERGENCY ALERTS (Samsung & Mobile)
+        socket.on('emergency_response_alert', (data) => {
+            console.log("Emergency Alert Received:", data);
+            triggerPanic(data.id || data.rideId, data, data.type.includes('SOS'));
         });
 
         const triggerPanic = (rideId, data, isSOS) => {
@@ -105,14 +92,21 @@ function LiveMap() {
         };
 
         return () => {
-            socket.off('location_update');
-            socket.off('handoff_accept');
-            socket.off('sos_alert');
-            socket.off('women_cell_alert');
-            socket.off('women_cell_update');
-            socket.off('anomaly_alert');
+            socket.off('emergency_response_alert');
         };
     }, []);
+
+    const fetchHistory = async () => {
+        try {
+            const resp = await fetch('http://localhost:8080/api/incidents');
+            const data = await resp.json();
+            setHistory(data);
+            setShowHistory(true);
+        } catch (e) {
+            console.error("Failed to fetch history", e);
+            alert("Spring Boot Police Service is Offline. Ensure it is running on port 8080.");
+        }
+    };
 
     const activeRides = Object.values(rides);
 
@@ -174,14 +168,23 @@ function LiveMap() {
                             </div>
 
                             {/* Action Buttons */}
-                            <div className="flex gap-4 mt-8">
+                            {alertData.dispatchLink ? (
+                                <a
+                                    href={alertData.dispatchLink}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="flex-1 bg-gradient-to-r from-blue-600 to-blue-800 hover:from-blue-500 hover:to-blue-700 text-white font-bold py-4 rounded shadow-lg transform hover:scale-[1.02] transition-all uppercase tracking-widest text-lg text-center flex items-center justify-center gap-2"
+                                >
+                                    🧭 Navigate to Site
+                                </a>
+                            ) : (
                                 <button onClick={() => setAlertData(null)} className="flex-1 bg-gradient-to-r from-red-600 to-red-800 hover:from-red-500 hover:to-red-700 text-white font-bold py-4 rounded shadow-lg transform hover:scale-[1.02] transition-all uppercase tracking-widest text-lg">
                                     🚨 Dispatch Patrol Unit
                                 </button>
-                                <button onClick={() => setAlertData(null)} className="px-8 border border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-500 rounded font-bold uppercase tracking-wider text-sm">
-                                    Dismiss
-                                </button>
-                            </div>
+                            )}
+                            <button onClick={() => setAlertData(null)} className="px-8 border border-slate-700 text-slate-500 hover:text-slate-300 hover:border-slate-500 rounded font-bold uppercase tracking-wider text-sm">
+                                Dismiss
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -189,18 +192,78 @@ function LiveMap() {
 
             {/* Stats Panel */}
             <div className="absolute top-4 left-4 z-[1000] bg-slate-900/90 p-6 rounded-2xl shadow-2xl border border-slate-700 backdrop-blur-md">
-                <h1 className="text-2xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-pink-500 to-purple-500">
-                    🛡️ Rapido Guardian
+                <h1 className="text-2xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-cyan-500">
+                    🛡️ Universal Safety Shield
                 </h1>
                 <div className="mt-4 space-y-2">
                     <p className="text-slate-300 text-sm">Active Rides: <span className="text-white font-bold text-lg">{activeRides.length}</span></p>
                     <p className="text-slate-300 text-sm">Police Stations: <span className="text-blue-400 font-bold text-lg">{stations.length}</span></p>
                 </div>
-                <div className="mt-4 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-                    <span className="text-[10px] text-green-500 font-bold tracking-widest uppercase">System Operational</span>
+                <div className="mt-4 flex flex-col gap-2">
+                    <button
+                        onClick={fetchHistory}
+                        className="bg-blue-600/20 hover:bg-blue-600/40 text-blue-400 border border-blue-600/30 px-3 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2"
+                    >
+                        📊 Safety Analytics (Spring Boot)
+                    </button>
+                    <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                        <span className="text-[10px] text-green-500 font-bold tracking-widest uppercase">System Operational</span>
+                    </div>
                 </div>
             </div>
+
+            {/* 📊 HISTORY MODAL (ENTERPRISE ANALYTICS) */}
+            {showHistory && (
+                <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+                    <div className="bg-slate-950 border border-slate-800 w-full max-w-4xl max-h-[80vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+                        <div className="p-6 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+                            <div>
+                                <h2 className="text-xl font-bold text-white">🏙️ Enterprise Incident Management</h2>
+                                <p className="text-slate-400 text-xs mt-1">Fetched from Spring Boot Police Service on Port 8080</p>
+                            </div>
+                            <button onClick={() => setShowHistory(false)} className="text-slate-400 hover:text-white text-2xl">&times;</button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-6">
+                            <table className="w-full text-left text-sm">
+                                <thead className="text-slate-500 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                                    <tr>
+                                        <th className="pb-3 px-2">Timestamp</th>
+                                        <th className="pb-3 px-2">Incident Type</th>
+                                        <th className="pb-3 px-2">Passenger</th>
+                                        <th className="pb-3 px-2">Vehicle</th>
+                                        <th className="pb-3 px-2">Jurisdiction</th>
+                                        <th className="pb-3 px-2">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="text-slate-300">
+                                    {history.map((item, idx) => (
+                                        <tr key={idx} className="border-b border-slate-900 hover:bg-slate-900/30 transition-colors">
+                                            <td className="py-4 px-2">{new Date(item.timestamp).toLocaleString()}</td>
+                                            <td className="py-4 px-2">
+                                                <span className={`px-2 py-1 rounded text-[10px] font-bold ${item.type.includes('SOS') ? 'bg-red-600/20 text-red-500' : 'bg-yellow-600/20 text-yellow-500'}`}>
+                                                    {item.type}
+                                                </span>
+                                            </td>
+                                            <td className="py-4 px-2 font-bold text-white">{item.passengerName}</td>
+                                            <td className="py-4 px-2">{item.vehicleNumber}</td>
+                                            <td className="py-4 px-2 text-blue-400">{item.jurisdiction}</td>
+                                            <td className="py-4 px-2">
+                                                <a href={item.dispatchLink} target="_blank" className="text-cyan-400 hover:underline">View Map</a>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                    {history.length === 0 && (
+                                        <tr>
+                                            <td colSpan="6" className="py-10 text-center text-slate-600 italic">No incidents recorded in the cloud database yet.</td>
+                                        </tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <MapContainer
                 center={[30.3500, 76.3900]} // Centered on Patiala

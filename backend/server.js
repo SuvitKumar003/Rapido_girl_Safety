@@ -1,10 +1,12 @@
-const http = require('http');
 const express = require('express');
+const http = require('http');
 const { Server } = require('socket.io');
+require('dotenv').config();
 const cors = require('cors');
 
-// 🔌 PLUG & PLAY MODULE
+// 🔌 PLUG & PLAY MODULES
 const SafetyLayer = require('./src/services/SafetyLayer');
+const SamsungExtension = require('./src/services/SamsungExtension');
 
 const app = express();
 app.use(cors());
@@ -17,8 +19,14 @@ const io = new Server(server, {
     }
 });
 
-// Initialize the Safety Engine
+// Initialize the Safety Engine & Samsung SDK Extension
 const safetyEngine = new SafetyLayer(io);
+const samsungSDK = new SamsungExtension(safetyEngine);
+
+// Start Heartbeat Monitor (Universal Safety)
+setInterval(() => {
+    safetyEngine.checkHeartbeats();
+}, 5000);
 
 console.log("-----------------------------------------");
 console.log("   🛡️  RAPIDO SAFETY SHIELD INTERFACE    ");
@@ -56,15 +64,15 @@ io.on('connection', (socket) => {
                         console.log(`✅ Route Found! Dispatching Ride ${rideId} (Scenario: ${isUnsafe ? 'UNSAFE 🚨' : 'SAFE 🟢'})`);
 
 
-                        // a) Notify Configured Safety Layer
+                        // a) Notify Configured Safety Layer (Universal Monitor)
                         const rideDetails = {
                             rideId: rideId,
                             driverName: "Vikram Singh",
-                            vehicleNumber: `PB-11-A-11${rideCount < 10 ? '0' + rideCount : rideCount}`, // Privacy Masking (11XX)
-                            passengerName: "Ananya Sharma", // Demo Name from "Women's App"
+                            vehicleNumber: `PB-11-A-11${rideCount < 10 ? '0' + rideCount : rideCount}`,
+                            passengerName: "Ananya Sharma",
                             phone: "+91-98765-43210"
                         };
-                        safetyEngine.initializeRide(rideDetails, routeCoords);
+                        safetyEngine.initializeMonitor(rideDetails, routeCoords);
 
                         // b) Confirm to User
                         socket.emit('ride_confirmed', {
@@ -101,13 +109,18 @@ io.on('connection', (socket) => {
 
     // 3. SOS (Manual Trigger)
     socket.on('sos_trigger', (data) => {
-        safetyEngine.triggerAlert(data.rideId, "MANUAL_SOS", null); // Fallback to old method for SOS
+        safetyEngine.triggerAlert(data.rideId || data.userId, "MANUAL_SOS", data.location || null);
     });
 
-    // 4. USER SAFETY RESPONSE (Access Check)
+    // 4. SAMSUNG KNOX TRIGGERS (Special Feature)
+    socket.on('samsung_device_event', (data) => {
+        // data: { id, type, location }
+        samsungSDK.simulateDeviceEvent(data.id, data.type, data.location);
+    });
+
+    // 5. USER SAFETY RESPONSE
     socket.on('safety_response', (data) => {
-        // data: { rideId, isSafe: boolean }
-        safetyEngine.handleUserResponse(data.rideId, data.isSafe);
+        safetyEngine.handleUserResponse(data.rideId || data.userId, data.isSafe);
     });
 
     socket.on('join_ride', (rideId) => {
